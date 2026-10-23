@@ -474,15 +474,29 @@ class FacebookIE(InfoExtractor):
                 r'data-sjs>({.*?ScheduledServerJS.*?})</script>', webpage)]
             post = traverse_obj(post_data, (
                 ..., 'require', ..., ..., ..., '__bbox', 'require', ..., ..., ..., '__bbox', 'result', 'data'), expected_type=dict) or []
-            media = traverse_obj(post, (..., 'attachments', ..., lambda k, v: (
-                k == 'media' and str(v['id']) == video_id and v['__typename'] == 'Video')), expected_type=dict)
+
+            def is_video_node(node):
+                return str(node['id']) == video_id and node['__typename'] == 'Video'
+
+            media = traverse_obj(post, (..., (
+                ('attachments', ..., lambda k, v: k == 'media' and is_video_node(v)),
+                # Logged-in sessions get /videos/ permalink pages without attachments;
+                # the full Video node (owner, post text) is only in the side pane there
+                ('tahoe_sidepane_renderer', lambda k, v: k == 'video' and is_video_node(v)),
+            )), expected_type=dict)
             title = get_first(media, ('title', 'text'))
             description = get_first(media, ('creation_story', 'comet_sections', 'message', 'story', 'message', 'text'))
-            page_title = title or self._html_search_regex((
+            title_regexes = [
                 r'<h2\s+[^>]*class="uiHeaderTitle"[^>]*>(?P<content>[^<]*)</h2>',
                 r'(?s)<span class="fbPhotosPhotoCaption".*?id="fbPhotoPageCaption"><span class="hasCaption">(?P<content>.*?)</span>',
-                self._meta_regex('og:title'), self._meta_regex('twitter:title'), r'<title>(?P<content>.+?)</title>',
-            ), webpage, 'title', default=None, group='content')
+                self._meta_regex('og:title'), self._meta_regex('twitter:title'),
+            ]
+            if title != '':
+                # An explicitly empty media title means the video is untitled; logged-in pages then only
+                # offer a generic <title> in the account's language ("Facebook", "Video"), not a real title
+                title_regexes.append(r'<title>(?P<content>.+?)</title>')
+            page_title = title or self._html_search_regex(
+                title_regexes, webpage, 'title', default=None, group='content')
             description = description or self._html_search_meta(
                 ['description', 'og:description', 'twitter:description'],
                 webpage, 'description', default=None)
@@ -597,7 +611,8 @@ class FacebookIE(InfoExtractor):
         if not video_data:
             data = extract_relay_prefetched_data(
                 r'"(?:dash_manifest|playable_url(?:_quality_hd)?)',
-                target_keys=('video', 'event', 'nodes', 'node', 'mediaset'))
+                target_keys=('video', 'event', 'nodes', 'node', 'mediaset',
+                             'videoDeliveryResponseFragment', 'videoDeliveryLegacyFields'))
             if data:
                 entries = []
 
@@ -726,6 +741,10 @@ class FacebookIE(InfoExtractor):
 
                 video = traverse_obj(data, (
                     'event', 'cover_media_renderer', 'cover_video'), 'video', expected_type=dict) or {}
+                if not video and any(key in data for key in ('videoDeliveryResponseFragment', 'videoDeliveryLegacyFields')):
+                    # Logged-in sessions are redirected to /videos/ permalink pages,
+                    # which embed the Video node at the root of the prefetched data
+                    video = data
                 if video:
                     attachments = try_get(video, [
                         lambda x: x['story']['attachments'],
