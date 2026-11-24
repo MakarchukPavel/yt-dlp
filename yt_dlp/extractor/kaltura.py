@@ -171,6 +171,21 @@ class KalturaIE(InfoExtractor):
         ],
     }]
     _WEBPAGE_TESTS = [{
+        # Kaltura MediaSpace: media URLs require session (KS) and referrer signing
+        'url': 'https://video.academyart.edu/media/3D%2BDraping%2BWorkshopA%2BAbstract%2BForms%2Band%2Bthe%2BBody%2B%7C%2BAcademy%2Bof%2BArt%2BUniversity/1_rqzolei4',
+        'info_dict': {
+            'id': '1_rqzolei4',
+            'ext': 'mp4',
+            'title': '3D Draping Workshop: Abstract Forms and the Body | Academy of Art University',
+            'thumbnail': r're:https?://cfvod\.kaltura\.com/.+',
+            'duration': 7301,
+            'timestamp': 1607879851,
+            'upload_date': '20201213',
+            'uploader_id': 'schema@academyart.edu',
+            'view_count': int,
+        },
+        'params': {'skip_download': True},
+    }, {
         'url': 'https://www.cornell.edu/VIDEO/nima-arkani-hamed-standard-models-of-particle-physics',
         'info_dict': {
             'id': '1_sgtvehim',
@@ -272,9 +287,12 @@ class KalturaIE(InfoExtractor):
             service_mobj = re.search(
                 rf'<script[^>]+src=(["\'])(?P<id>(?:https?:)?//(?:(?!\1).)+)/p/{escaped_pid}/sp/{escaped_pid}00/embedIframeJs',
                 webpage)
+            # Some partners (e.g. Kaltura MediaSpace) restrict media URLs by
+            # referrer, so pass the embedding page for referrer-based signing
+            smuggle_data = {'source_url': url}
             if service_mobj:
-                embed_url = smuggle_url(embed_url, {'service_url': service_mobj.group('id')})
-            urls.append(embed_url)
+                smuggle_data['service_url'] = service_mobj.group('id')
+            urls.append(smuggle_url(embed_url, smuggle_data))
         return urls
 
     def _kaltura_api_call(self, video_id, actions, service_url=None, **kwargs):
@@ -423,11 +441,11 @@ class KalturaIE(InfoExtractor):
 
         mobj = self._match_valid_url(url)
         partner_id, entry_id, player_type = mobj.group('partner_id', 'id', 'player_type')
-        ks, captions = None, None
+        ks, captions, session = None, None, None
         if not player_type:
             player_type = 'kwidget' if 'html5lib/v2' in url else 'html5'
         if partner_id and entry_id:
-            _, info, flavor_assets, captions = self._get_video_info(entry_id, partner_id, smuggled_data.get('service_url'), player_type=player_type)
+            session, info, flavor_assets, captions = self._get_video_info(entry_id, partner_id, smuggled_data.get('service_url'), player_type=player_type)
         else:
             path, query = mobj.group('path', 'query')
             if not path and not query:
@@ -448,7 +466,7 @@ class KalturaIE(InfoExtractor):
                 raise ExtractorError('Invalid URL', expected=True)
             if 'entry_id' in params:
                 entry_id = params['entry_id'][0]
-                _, info, flavor_assets, captions = self._get_video_info(entry_id, partner_id, player_type=player_type)
+                session, info, flavor_assets, captions = self._get_video_info(entry_id, partner_id, player_type=player_type)
             elif 'uiconf_id' in params and 'flashvars[referenceId]' in params:
                 reference_id = params['flashvars[referenceId]'][0]
                 webpage = self._download_webpage(url, reference_id)
@@ -463,7 +481,7 @@ class KalturaIE(InfoExtractor):
                 # Even if this fails we already have everything extracted
                 # apart from captions and can process at least with this
                 with contextlib.suppress(ExtractorError):
-                    _, info, flavor_assets, captions = self._get_video_info(
+                    session, info, flavor_assets, captions = self._get_video_info(
                         entry_id, partner_id, player_type=player_type)
             elif 'uiconf_id' in params and 'flashvars[playlistAPI.kpl0Id]' in params:
                 playlist_id = params['flashvars[playlistAPI.kpl0Id]'][0]
@@ -478,6 +496,12 @@ class KalturaIE(InfoExtractor):
             else:
                 raise ExtractorError('Invalid URL', expected=True)
             ks = params.get('flashvars[ks]', [None])[0]
+
+        # Some partners (e.g. Kaltura MediaSpace instances) require a Kaltura
+        # Session (KS) to access flavor/playManifest URLs. Fall back to the
+        # widget session obtained while fetching the video info for signing.
+        if not ks:
+            ks = traverse_obj(session, 'ks')
 
         return self._per_video_extract(smuggled_data, entry_id, info, ks, flavor_assets, captions)
 
